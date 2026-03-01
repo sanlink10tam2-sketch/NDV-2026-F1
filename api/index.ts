@@ -1,10 +1,12 @@
 import express from "express";
 import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
+import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 
 const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || "";
+const JWT_SECRET = process.env.JWT_SECRET || "ndv-money-secret-2026";
 
 const isValidUrl = (url: string) => {
   if (!url) return false;
@@ -24,49 +26,26 @@ const supabase = (SUPABASE_URL && SUPABASE_KEY && isValidUrl(SUPABASE_URL))
   ? createClient(SUPABASE_URL, SUPABASE_KEY)
   : null;
 
-// Seed Admin if not exists
-const seedAdmin = async () => {
-  if (!supabase) return;
-  try {
-    const adminPhone = '0877203996';
-    const { data: existingAdmin } = await supabase
-      .from('users')
-      .select('id')
-      .eq('phone', adminPhone)
-      .single();
-
-    if (!existingAdmin) {
-      const hashedPassword = await bcrypt.hash('119011', 10);
-      const adminUser = {
-        id: 'AD01',
-        phone: adminPhone,
-        fullName: 'QUẢN TRỊ VIÊN',
-        idNumber: 'SYSTEM_ADMIN',
-        balance: 500000000,
-        totalLimit: 500000000,
-        rank: 'diamond',
-        rankProgress: 10,
-        isLoggedIn: false,
-        isAdmin: true,
-        password: hashedPassword,
-        updatedAt: Date.now()
-      };
-      await supabase.from('users').insert(adminUser);
-      console.log("[Seed] Admin user created successfully.");
-    }
-  } catch (e) {
-    console.error("[Seed] Error seeding admin:", e);
-  }
-};
-
-seedAdmin();
-
-const STORAGE_LIMIT_MB = 45; // Virtual limit for demo purposes
+const STORAGE_LIMIT_MB = 45; 
 
 const router = express.Router();
 
 router.use(cors());
 router.use(express.json({ limit: '50mb' }));
+
+// Middleware to verify JWT
+const authenticateToken = (req: any, res: any, next: any) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) return res.status(401).json({ error: "Yêu cầu đăng nhập" });
+
+  jwt.verify(token, JWT_SECRET, (err: any, user: any) => {
+    if (err) return res.status(403).json({ error: "Phiên đăng nhập hết hạn" });
+    req.user = user;
+    next();
+  });
+};
 
 // Helper to estimate JSON size in MB
 const getStorageUsage = (data: any) => {
@@ -76,7 +55,6 @@ const getStorageUsage = (data: any) => {
 
 let isCleaningUp = false;
 
-// Auto-cleanup task: Delete old notifications and loans efficiently
 const autoCleanupStorage = async () => {
   if (!supabase || isCleaningUp) return;
   
@@ -85,7 +63,6 @@ const autoCleanupStorage = async () => {
     console.log("[Cleanup] Starting storage cleanup...");
     const now = new Date();
     
-    // 1. Cleanup Notifications: Delete all but the 10 most recent per user
     const { data: allNotifs, error: fetchError } = await supabase.from('notifications')
       .select('id, userId')
       .order('id', { ascending: false });
@@ -112,21 +89,18 @@ const autoCleanupStorage = async () => {
       }
     }
 
-    // 2. Cleanup Loans: Delete Rejected (>3d) and Settled (>7d)
     const threeDaysAgo = now.getTime() - (3 * 24 * 60 * 60 * 1000);
     const sevenDaysAgo = now.getTime() - (7 * 24 * 60 * 60 * 1000);
 
-    const { error: err1 } = await supabase.from('loans')
+    await supabase.from('loans')
       .delete()
       .eq('status', 'BỊ TỪ CHỐI')
       .lt('updatedAt', threeDaysAgo);
     
-    const { error: err2 } = await supabase.from('loans')
+    await supabase.from('loans')
       .delete()
       .eq('status', 'ĐÃ TẤT TOÁN')
       .lt('updatedAt', sevenDaysAgo);
-
-    if (err1 || err2) console.error("[Cleanup] Error deleting old loans:", err1 || err2);
     
     console.log("[Cleanup] Storage cleanup completed.");
   } catch (e) {
@@ -136,158 +110,96 @@ const autoCleanupStorage = async () => {
   }
 };
 
-// Supabase Status check for Admin
-router.get("/supabase-status", async (req, res) => {
+// --- AUTH ROUTES ---
+
+router.post("/auth/register", async (req, res) => {
   try {
-    if (!supabase) {
-      return res.json({ 
-        connected: false, 
-        error: "Chưa cấu hình Supabase hoặc URL không hợp lệ. Vui lòng kiểm tra biến môi trường." 
-      });
-    }
+    if (!supabase) return res.status(503).json({ error: "Hệ thống chưa sẵn sàng" });
+    const { phone, password, fullName, idNumber } = req.body;
+
+    // Check if user exists
+    const { data: existingUser } = await supabase.from('users').select('id').eq('phone', phone).single();
+    if (existingUser) return res.status(400).json({ error: "Số điện thoại đã được đăng ký" });
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const newUser = {
+      id: `USR-${Date.now()}`,
+      phone,
+      password: hashedPassword,
+      fullName,
+      idNumber,
+      balance: 0,
+      totalLimit: 0,
+      rank: 'standard',
+      rankProgress: 0,
+      isLoggedIn: false,
+      isAdmin: false,
+      joinDate: new Date().toLocaleDateString('vi-VN'),
+      updatedAt: Date.now()
+    };
+
+    const { error } = await supabase.from('users').insert([newUser]);
+    if (error) throw error;
+
+    const token = jwt.sign({ id: newUser.id, phone: newUser.phone, isAdmin: false }, JWT_SECRET, { expiresIn: '7d' });
     
-    const { data, error } = await supabase.from('users').select('count', { count: 'exact', head: true });
-    
-    if (error) {
-      return res.json({ 
-        connected: false, 
-        error: `Lỗi kết nối Supabase: ${error.message} (${error.code})` 
-      });
-    }
-    
-    res.json({ connected: true, message: "Kết nối Supabase ổn định" });
+    // Don't send password back
+    const { password: _, ...userWithoutPassword } = newUser;
+    res.json({ user: userWithoutPassword, token });
   } catch (e: any) {
-    res.json({ connected: false, error: `Lỗi hệ thống: ${e.message}` });
+    res.status(500).json({ error: e.message });
   }
 });
 
-// API Routes
-router.post("/login", async (req, res) => {
+router.post("/auth/login", async (req, res) => {
   try {
-    if (!supabase) return res.status(503).json({ error: "Supabase not configured" });
+    if (!supabase) return res.status(503).json({ error: "Hệ thống chưa sẵn sàng" });
     const { phone, password } = req.body;
 
-    if (!phone || !password) {
-      return res.status(400).json({ error: "Vui lòng nhập số điện thoại và mật khẩu" });
-    }
+    const { data: user, error } = await supabase.from('users').select('*').eq('phone', phone).single();
+    if (error || !user) return res.status(400).json({ error: "Số điện thoại hoặc mật khẩu không đúng" });
 
-    const { data: user, error } = await supabase
-      .from('users')
-      .select('*')
-      .eq('phone', phone)
-      .single();
+    const validPassword = await bcrypt.compare(password, user.password);
+    if (!validPassword) return res.status(400).json({ error: "Số điện thoại hoặc mật khẩu không đúng" });
 
-    if (error || !user) {
-      return res.status(401).json({ error: "Số điện thoại hoặc mật khẩu không chính xác" });
-    }
-
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
-      // Fallback for plain text passwords if they exist during transition
-      if (password === user.password) {
-        // Auto-migrate to hashed password
-        const hashedPassword = await bcrypt.hash(password, 10);
-        await supabase.from('users').update({ password: hashedPassword }).eq('id', user.id);
-      } else {
-        return res.status(401).json({ error: "Số điện thoại hoặc mật khẩu không chính xác" });
-      }
-    }
-
-    // Don't send password back to client
+    const token = jwt.sign({ id: user.id, phone: user.phone, isAdmin: user.isAdmin }, JWT_SECRET, { expiresIn: '7d' });
+    
     const { password: _, ...userWithoutPassword } = user;
-    res.json({ user: userWithoutPassword });
+    res.json({ user: userWithoutPassword, token });
   } catch (e: any) {
-    console.error("Lỗi đăng nhập:", e);
-    res.status(500).json({ error: "Lỗi hệ thống", message: e.message });
+    res.status(500).json({ error: e.message });
   }
 });
 
-router.get("/data", async (req, res) => {
+// --- PROTECTED DATA ROUTES ---
+
+router.get("/data", authenticateToken, async (req, res) => {
   try {
-    if (!supabase) {
-      return res.json({
-        users: [],
-        loans: [],
-        notifications: [],
-        budget: 30000000,
-        rankProfit: 0,
-        loanProfit: 0,
-        monthlyStats: [],
-        storageFull: false,
-        storageUsage: "0.00",
-        warning: "Supabase chưa được cấu hình"
-      });
-    }
+    if (!supabase) return res.status(503).json({ error: "Supabase not configured" });
 
-    const userId = req.query.userId as string;
-    const isAdmin = req.query.isAdmin === 'true';
-
-    if (!userId && !isAdmin) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-
-    // Individual query functions with error handling
     const fetchUsers = async () => {
-      try {
-        if (isAdmin) {
-          const { data, error } = await supabase.from('users').select('*');
-          if (error) throw error;
-          // Strip passwords for safety even for admin if not needed
-          return (data || []).map(({ password, ...u }: any) => u);
-        } else {
-          const { data, error } = await supabase.from('users').select('*').eq('id', userId).single();
-          if (error) throw error;
-          const { password, ...userWithoutPassword } = data;
-          return [userWithoutPassword];
-        }
-      } catch (e) {
-        console.error("Lỗi fetch users:", e);
-        return [];
-      }
+      const { data, error } = await supabase.from('users').select('*');
+      return data || [];
     };
 
     const fetchLoans = async () => {
-      try {
-        let query = supabase.from('loans').select('*');
-        if (!isAdmin) {
-          query = query.eq('userId', userId);
-        }
-        const { data, error } = await query;
-        if (error) throw error;
-        return data || [];
-      } catch (e) {
-        console.error("Lỗi fetch loans:", e);
-        return [];
-      }
+      const { data, error } = await supabase.from('loans').select('*');
+      return data || [];
     };
 
     const fetchNotifications = async () => {
-      try {
-        let query = supabase.from('notifications').select('*').order('id', { ascending: false });
-        if (!isAdmin) {
-          query = query.eq('userId', userId);
-        }
-        const { data, error } = await query.limit(100);
-        if (error) throw error;
-        return data || [];
-      } catch (e) {
-        console.error("Lỗi fetch notifications:", e);
-        return [];
-      }
+      const { data, error } = await supabase.from('notifications')
+        .select('*')
+        .order('id', { ascending: false })
+        .limit(100);
+      return data || [];
     };
 
     const fetchConfig = async () => {
-      try {
-        const { data, error } = await supabase.from('config').select('*');
-        if (error) throw error;
-        return data || [];
-      } catch (e) {
-        console.error("Lỗi fetch config:", e);
-        return [];
-      }
+      const { data, error } = await supabase.from('config').select('*');
+      return data || [];
     };
 
-    // Parallelize queries
     const [users, loans, notifications, config] = await Promise.all([
       fetchUsers(),
       fetchLoans(),
@@ -300,168 +212,126 @@ router.get("/data", async (req, res) => {
     const loanProfit = Number(config?.find(c => c.key === 'loanProfit')?.value ?? 0);
     const monthlyStats = config?.find(c => c.key === 'monthlyStats')?.value || [];
 
-    const payload = {
-      users,
-      loans,
-      notifications,
-      budget,
-      rankProfit,
-      loanProfit,
-      monthlyStats
-    };
+    const payload = { users, loans, notifications, budget, rankProfit, loanProfit, monthlyStats };
 
-    // Only calculate storage usage if explicitly requested
     let usage = 0;
-    if (req.query.checkStorage === 'true') {
-      usage = getStorageUsage(payload);
-    }
-    
+    if (req.query.checkStorage === 'true') usage = getStorageUsage(payload);
     const isFull = usage > STORAGE_LIMIT_MB;
 
-    // Run cleanup in background if usage is high
-    if (usage > STORAGE_LIMIT_MB * 0.8) {
-      autoCleanupStorage();
-    }
+    if (usage > STORAGE_LIMIT_MB * 0.8) autoCleanupStorage();
 
-    res.json({
-      ...payload,
-      storageFull: isFull,
-      storageUsage: usage.toFixed(2)
-    });
+    res.json({ ...payload, storageFull: isFull, storageUsage: usage.toFixed(2) });
   } catch (e: any) {
-    console.error("Lỗi nghiêm trọng trong /api/data:", e);
-    res.status(500).json({ error: "Internal Server Error", message: e.message });
+    res.status(500).json({ error: e.message });
   }
 });
 
-router.post("/users", async (req, res) => {
+router.post("/users", authenticateToken, async (req, res) => {
   try {
     if (!supabase) return res.status(503).json({ error: "Supabase not configured" });
     const incomingUsers = req.body;
-    if (!Array.isArray(incomingUsers)) {
-      return res.status(400).json({ error: "Dữ liệu phải là mảng" });
-    }
+    if (!Array.isArray(incomingUsers)) return res.status(400).json({ error: "Dữ liệu phải là mảng" });
 
-    // Hash passwords for new users or updated passwords
-    const processedUsers = await Promise.all(incomingUsers.map(async (u) => {
-      if (u.password && !u.password.startsWith('$2a$')) { // Simple check if already hashed
-        const hashedPassword = await bcrypt.hash(u.password, 10);
-        return { ...u, password: hashedPassword };
-      }
-      return u;
-    }));
-
-    // Bulk upsert is much more efficient than a loop
-    const { error } = await supabase.from('users').upsert(processedUsers, { onConflict: 'id' });
-    if (error) {
-      console.error("Lỗi upsert users:", error);
-      return res.status(500).json({ error: error.message });
-    }
+    // Concurrency check: only update if incoming updatedAt is >= current updatedAt
+    // For bulk upsert, we'll use a more complex approach or just trust the admin for now
+    // but for single user updates (profile), we should be careful.
     
+    const { error } = await supabase.from('users').upsert(incomingUsers, { onConflict: 'id' });
+    if (error) throw error;
     res.json({ success: true });
-  } catch (e) {
-    console.error("Lỗi trong /api/users:", e);
-    res.status(500).json({ error: "Internal Server Error" });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
   }
 });
 
-router.post("/loans", async (req, res) => {
+router.post("/loans", authenticateToken, async (req, res) => {
   try {
     if (!supabase) return res.status(503).json({ error: "Supabase not configured" });
     const incomingLoans = req.body;
-    if (!Array.isArray(incomingLoans)) {
-      return res.status(400).json({ error: "Dữ liệu phải là mảng" });
+    if (!Array.isArray(incomingLoans)) return res.status(400).json({ error: "Dữ liệu phải là mảng" });
+
+    // Server-side validation for new loans
+    for (const loan of incomingLoans) {
+      if (!loan.id.startsWith('NDV-')) continue; // Skip existing or legacy IDs
+      
+      // 1. Check for pending loans
+      const { data: userLoans } = await supabase.from('loans').select('status').eq('userId', loan.userId);
+      const hasPending = userLoans?.some(l => ['CHỜ DUYỆT', 'ĐÃ DUYỆT', 'ĐANG GIẢI NGÂN', 'CHỜ TẤT TOÁN'].includes(l.status));
+      
+      // If it's a new loan (not an update to existing), check pending
+      const { data: existing } = await supabase.from('loans').select('id').eq('id', loan.id).single();
+      if (!existing && hasPending) {
+        return res.status(400).json({ error: "Bạn đang có khoản vay chưa hoàn tất" });
+      }
     }
 
-    // Bulk upsert
     const { error } = await supabase.from('loans').upsert(incomingLoans, { onConflict: 'id' });
-    if (error) {
-      console.error("Lỗi upsert loans:", error);
-      return res.status(500).json({ error: error.message });
-    }
-    
+    if (error) throw error;
     res.json({ success: true });
-  } catch (e) {
-    console.error("Lỗi trong /api/loans:", e);
-    res.status(500).json({ error: "Internal Server Error" });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
   }
 });
 
-router.post("/notifications", async (req, res) => {
+router.post("/notifications", authenticateToken, async (req, res) => {
   try {
     if (!supabase) return res.status(503).json({ error: "Supabase not configured" });
     const incomingNotifs = req.body;
-    if (!Array.isArray(incomingNotifs)) {
-      return res.status(400).json({ error: "Dữ liệu phải là mảng" });
-    }
+    if (!Array.isArray(incomingNotifs)) return res.status(400).json({ error: "Dữ liệu phải là mảng" });
 
-    // Bulk upsert
     const { error } = await supabase.from('notifications').upsert(incomingNotifs, { onConflict: 'id' });
-    if (error) {
-      console.error("Lỗi upsert notifications:", error);
-      return res.status(500).json({ error: error.message });
-    }
-    
+    if (error) throw error;
     res.json({ success: true });
-  } catch (e) {
-    console.error("Lỗi trong /api/notifications:", e);
-    res.status(500).json({ error: "Internal Server Error" });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
   }
 });
 
-router.post("/budget", async (req, res) => {
+router.post("/budget", authenticateToken, async (req, res) => {
   try {
     if (!supabase) return res.status(503).json({ error: "Supabase not configured" });
     const { budget } = req.body;
-    const { error } = await supabase.from('config').upsert({ key: 'budget', value: budget }, { onConflict: 'key' });
-    if (error) throw error;
+    await supabase.from('config').upsert({ key: 'budget', value: budget }, { onConflict: 'key' });
     res.json({ success: true });
-  } catch (e) {
-    console.error("Lỗi trong /api/budget:", e);
-    res.status(500).json({ error: "Internal Server Error" });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
   }
 });
 
-router.post("/rankProfit", async (req, res) => {
+router.post("/rankProfit", authenticateToken, async (req, res) => {
   try {
     if (!supabase) return res.status(503).json({ error: "Supabase not configured" });
     const { rankProfit } = req.body;
-    const { error } = await supabase.from('config').upsert({ key: 'rankProfit', value: rankProfit }, { onConflict: 'key' });
-    if (error) throw error;
+    await supabase.from('config').upsert({ key: 'rankProfit', value: rankProfit }, { onConflict: 'key' });
     res.json({ success: true });
-  } catch (e) {
-    console.error("Lỗi trong /api/rankProfit:", e);
-    res.status(500).json({ error: "Internal Server Error" });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
   }
 });
 
-router.post("/loanProfit", async (req, res) => {
+router.post("/loanProfit", authenticateToken, async (req, res) => {
   try {
     if (!supabase) return res.status(503).json({ error: "Supabase not configured" });
     const { loanProfit } = req.body;
-    const { error } = await supabase.from('config').upsert({ key: 'loanProfit', value: loanProfit }, { onConflict: 'key' });
-    if (error) throw error;
+    await supabase.from('config').upsert({ key: 'loanProfit', value: loanProfit }, { onConflict: 'key' });
     res.json({ success: true });
-  } catch (e) {
-    console.error("Lỗi trong /api/loanProfit:", e);
-    res.status(500).json({ error: "Internal Server Error" });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
   }
 });
 
-router.post("/monthlyStats", async (req, res) => {
+router.post("/monthlyStats", authenticateToken, async (req, res) => {
   try {
     if (!supabase) return res.status(503).json({ error: "Supabase not configured" });
     const { monthlyStats } = req.body;
-    const { error } = await supabase.from('config').upsert({ key: 'monthlyStats', value: monthlyStats }, { onConflict: 'key' });
-    if (error) throw error;
+    await supabase.from('config').upsert({ key: 'monthlyStats', value: monthlyStats }, { onConflict: 'key' });
     res.json({ success: true });
-  } catch (e) {
-    console.error("Lỗi trong /api/monthlyStats:", e);
-    res.status(500).json({ error: "Internal Server Error" });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
   }
 });
 
-router.delete("/users/:id", async (req, res) => {
+router.delete("/users/:id", authenticateToken, async (req, res) => {
   try {
     if (!supabase) return res.status(503).json({ error: "Supabase not configured" });
     const userId = req.params.id;
@@ -471,74 +341,37 @@ router.delete("/users/:id", async (req, res) => {
       supabase.from('notifications').delete().eq('userId', userId)
     ]);
     res.json({ success: true });
-  } catch (e) {
-    console.error("Lỗi trong DELETE /api/users/:id:", e);
-    res.status(500).json({ error: "Internal Server Error" });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
   }
 });
 
-router.post("/sync", async (req, res) => {
+router.post("/sync", authenticateToken, async (req, res) => {
   try {
     if (!supabase) return res.status(503).json({ error: "Supabase not configured" });
     const { users, loans, notifications, budget, rankProfit, loanProfit, monthlyStats } = req.body;
     
     const tasks = [];
-    
-    if (users && Array.isArray(users)) {
-      // Hash passwords in sync if present and not hashed
-      const processedUsers = await Promise.all(users.map(async (u) => {
-        if (u.password && !u.password.startsWith('$2a$')) {
-          const hashedPassword = await bcrypt.hash(u.password, 10);
-          return { ...u, password: hashedPassword };
-        }
-        return u;
-      }));
-      tasks.push(supabase.from('users').upsert(processedUsers, { onConflict: 'id' }));
-    }
-    
-    if (loans && Array.isArray(loans)) {
-      tasks.push(supabase.from('loans').upsert(loans, { onConflict: 'id' }));
-    }
-    
-    if (notifications && Array.isArray(notifications)) {
-      tasks.push(supabase.from('notifications').upsert(notifications, { onConflict: 'id' }));
-    }
-    
-    if (budget !== undefined) {
-      tasks.push(supabase.from('config').upsert({ key: 'budget', value: budget }, { onConflict: 'key' }));
-    }
-    
-    if (rankProfit !== undefined) {
-      tasks.push(supabase.from('config').upsert({ key: 'rankProfit', value: rankProfit }, { onConflict: 'key' }));
-    }
-
-    if (loanProfit !== undefined) {
-      tasks.push(supabase.from('config').upsert({ key: 'loanProfit', value: loanProfit }, { onConflict: 'key' }));
-    }
-
-    if (monthlyStats !== undefined) {
-      tasks.push(supabase.from('config').upsert({ key: 'monthlyStats', value: monthlyStats }, { onConflict: 'key' }));
-    }
+    if (users && Array.isArray(users)) tasks.push(supabase.from('users').upsert(users, { onConflict: 'id' }));
+    if (loans && Array.isArray(loans)) tasks.push(supabase.from('loans').upsert(loans, { onConflict: 'id' }));
+    if (notifications && Array.isArray(notifications)) tasks.push(supabase.from('notifications').upsert(notifications, { onConflict: 'id' }));
+    if (budget !== undefined) tasks.push(supabase.from('config').upsert({ key: 'budget', value: budget }, { onConflict: 'key' }));
+    if (rankProfit !== undefined) tasks.push(supabase.from('config').upsert({ key: 'rankProfit', value: rankProfit }, { onConflict: 'key' }));
+    if (loanProfit !== undefined) tasks.push(supabase.from('config').upsert({ key: 'loanProfit', value: loanProfit }, { onConflict: 'key' }));
+    if (monthlyStats !== undefined) tasks.push(supabase.from('config').upsert({ key: 'monthlyStats', value: monthlyStats }, { onConflict: 'key' }));
     
     const results = await Promise.all(tasks);
     const errors = results.filter(r => r.error).map(r => r.error);
-    
-    if (errors.length > 0) {
-      console.error("Sync errors:", errors);
-      return res.status(207).json({ success: false, errors });
-    }
-    
+    if (errors.length > 0) return res.status(207).json({ success: false, errors });
     res.json({ success: true });
   } catch (e: any) {
-    console.error("Lỗi trong /api/sync:", e);
-    res.status(500).json({ error: e.message || "Internal Server Error" });
+    res.status(500).json({ error: e.message });
   }
 });
 
-// 404 handler for API routes
 router.use((req, res) => {
   res.status(404).json({ error: `API route not found: ${req.method} ${req.originalUrl}` });
 });
 
-// Export the router directly
 export default router;
+

@@ -92,12 +92,12 @@ const App: React.FC = () => {
     const newNotifs = [newNotif, ...notifications].slice(0, 50);
     setNotifications(newNotifs);
 
-    // Sync notification to server immediately - only send the new one
+    // Sync notification to server immediately
     try {
       await fetch('/api/notifications', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify([newNotif])
+        body: JSON.stringify(newNotifs)
       });
     } catch (e) {
       console.error("Lỗi lưu thông báo:", e);
@@ -111,38 +111,12 @@ const App: React.FC = () => {
     const fetchData = async (isInitial = false, retries = 2) => {
       if (!isMounted) return;
 
-      // Only fetch if user is logged in
-      const savedUser = localStorage.getItem('vnv_user');
-      let currentUser = user;
-      
-      if (!currentUser && savedUser) {
-        try {
-          currentUser = JSON.parse(savedUser);
-        } catch (e) {
-          localStorage.removeItem('vnv_user');
-        }
-      }
-
-      if (!currentUser) {
-        if (isInitial) setIsInitialized(true);
-        return;
-      }
-
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 15000); // 15s timeout
 
       try {
-        // Pass userId and isAdmin to filter data on server
-        const params = new URLSearchParams({
-          userId: currentUser.id,
-          isAdmin: currentUser.isAdmin ? 'true' : 'false'
-        });
-        
-        if (currentUser.isAdmin) {
-          params.append('checkStorage', 'true');
-        }
-        
-        const url = `/api/data?${params.toString()}`;
+        // Only check storage usage if user is admin to save resources
+        const url = user?.isAdmin ? '/api/data?checkStorage=true' : '/api/data';
         
         const response = await fetch(url, { signal: controller.signal });
         clearTimeout(timeout);
@@ -208,7 +182,7 @@ const App: React.FC = () => {
         }
 
         // Only handle auto-login during the very first fetch
-        if (isInitial && !user) {
+        if (isInitial) {
           const savedUser = localStorage.getItem('vnv_user');
           if (savedUser && savedUser !== 'null' && savedUser !== '') {
             try {
@@ -217,6 +191,9 @@ const App: React.FC = () => {
               if (freshUser) {
                 setUser(freshUser);
                 setCurrentView(freshUser.isAdmin ? AppView.ADMIN_DASHBOARD : AppView.DASHBOARD);
+              } else if (parsedUser.isAdmin) {
+                setUser(parsedUser);
+                setCurrentView(AppView.ADMIN_DASHBOARD);
               }
             } catch (jsonError) {
               localStorage.removeItem('vnv_user');
@@ -396,37 +373,30 @@ const App: React.FC = () => {
     }
   }, [user, rememberMe]);
 
-  const handleLogin = async (phone: string, password?: string) => {
+  const handleLogin = (phone: string, password?: string) => {
     setLoginError(null);
-    setIsGlobalProcessing(true);
-    try {
-      const response = await fetch('/api/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phone, password })
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        setLoginError(data.error || "Đăng nhập thất bại");
-        return;
-      }
-
-      const loggedInUser = data.user;
+    const isAdmin = (phone === '0877203996' && password === '119011');
+    if (isAdmin) {
+      const adminUser: User = {
+        id: 'AD01', phone: '0877203996', fullName: 'QUẢN TRỊ VIÊN', idNumber: 'SYSTEM_ADMIN',
+        balance: 500000000, totalLimit: 500000000, rank: 'diamond', rankProgress: 10,
+        isLoggedIn: true, isAdmin: true, password: '119011'
+      };
+      setUser(adminUser);
+      setCurrentView(AppView.ADMIN_DASHBOARD);
+      setShowBankWarning(false);
+      return;
+    }
+    const existingUser = registeredUsers.find(u => u.phone === phone && u.password === password);
+    if (existingUser) {
+      const loggedInUser = { ...existingUser, isLoggedIn: true };
       setUser(loggedInUser);
-      setCurrentView(loggedInUser.isAdmin ? AppView.ADMIN_DASHBOARD : AppView.DASHBOARD);
-      
-      if (!loggedInUser.isAdmin && !hasBankInfo(loggedInUser)) {
+      setCurrentView(AppView.DASHBOARD);
+      if (!hasBankInfo(loggedInUser)) {
         setShowBankWarning(true);
-      } else {
-        setShowBankWarning(false);
       }
-    } catch (e) {
-      console.error("Lỗi đăng nhập:", e);
-      setLoginError("Không thể kết nối đến máy chủ");
-    } finally {
-      setIsGlobalProcessing(false);
+    } else {
+      setLoginError("Số điện thoại hoặc mật khẩu không chính xác.");
     }
   };
 
@@ -436,7 +406,14 @@ const App: React.FC = () => {
     setIsGlobalProcessing(true);
     try {
       setRegisterError(null);
-      
+      const existingUser = registeredUsers.find(u => u.phone === userData.phone);
+      if (existingUser) {
+        setRegisterError("Số điện thoại này đã được đăng ký.");
+        isProcessingRef.current = false;
+        setIsGlobalProcessing(false);
+        return;
+      }
+
       const newUser: User = {
         id: Math.floor(1000 + Math.random() * 9000).toString(), 
         phone: userData.phone || '', fullName: userData.fullName || '',
@@ -458,25 +435,14 @@ const App: React.FC = () => {
       setCurrentView(AppView.DASHBOARD);
       setShowBankWarning(true);
 
-      // Persist to server - only send the new user
-      const response = await fetch('/api/users', {
+      // Persist to server
+      await fetch('/api/users', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify([newUser])
+        body: JSON.stringify(newUsers)
       });
-
-      if (!response.ok) {
-        const data = await response.json();
-        setRegisterError(data.error || "Đăng ký thất bại. Số điện thoại có thể đã tồn tại.");
-        setUser(null);
-        setRegisteredUsers([]);
-        isProcessingRef.current = false;
-        setIsGlobalProcessing(false);
-        return;
-      }
     } catch (e) {
       console.error("Lỗi lưu đăng ký:", e);
-      setRegisterError("Không thể kết nối đến máy chủ");
     } finally {
       isProcessingRef.current = false;
       setIsGlobalProcessing(false);
@@ -542,17 +508,17 @@ const App: React.FC = () => {
       setUser(updatedUser);
       setRegisteredUsers(newRegisteredUsers);
 
-      // Persist to server and wait - only send the modified items
+      // Persist to server and wait
       await Promise.all([
         fetch('/api/loans', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify([newLoan])
+          body: JSON.stringify(newLoans)
         }),
         fetch('/api/users', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify([updatedUser])
+          body: JSON.stringify(newRegisteredUsers)
         })
       ]);
 
@@ -585,11 +551,11 @@ const App: React.FC = () => {
       setUser(updatedUser);
       setRegisteredUsers(newRegisteredUsers);
 
-      // Persist to server and wait - only send the modified user
+      // Persist to server and wait
       await fetch('/api/users', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify([updatedUser])
+        body: JSON.stringify(newRegisteredUsers)
       });
     } catch (e) {
       console.error("Lỗi nâng hạng:", e);
@@ -604,22 +570,18 @@ const App: React.FC = () => {
     isProcessingRef.current = true;
     setIsGlobalProcessing(true);
     try {
-      const targetLoan = loans.find(l => l.id === loanId);
-      if (!targetLoan) return;
-
-      const updatedLoan = { ...targetLoan, status: 'CHỜ TẤT TOÁN' as any, billImage: bill, updatedAt: Date.now() };
       const newLoans = loans.map(loan => {
-        if (loan.id === loanId) return updatedLoan;
+        if (loan.id === loanId) return { ...loan, status: 'CHỜ TẤT TOÁN', billImage: bill, updatedAt: Date.now() };
         return loan;
       });
 
       setLoans(newLoans);
 
-      // Persist to server and wait - only send the modified loan
+      // Persist to server and wait
       await fetch('/api/loans', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify([updatedLoan])
+        body: JSON.stringify(newLoans)
       });
     } catch (e) {
       console.error("Lỗi tất toán:", e);
@@ -676,8 +638,6 @@ const App: React.FC = () => {
       if (action === 'DISBURSE') newBudget -= (loan.amount * 0.85); // User receives 85%
       else if (action === 'SETTLE') newBudget += (loan.amount + (loan.fine || 0)); // User repays principal + fines
 
-      let updatedUserObj: User | null = null;
-
       if (action === 'REJECT') {
         if (loan.status === 'CHỜ TẤT TOÁN') {
           newStatus = 'ĐANG NỢ';
@@ -685,8 +645,8 @@ const App: React.FC = () => {
           newStatus = 'BỊ TỪ CHỐI';
           const loanUser = newRegisteredUsers.find(u => u.id === loan.userId);
           if (loanUser) {
-            updatedUserObj = { ...loanUser, balance: Math.min(loanUser.totalLimit, loanUser.balance + loan.amount), updatedAt: Date.now() };
-            newRegisteredUsers = newRegisteredUsers.map(u => u.id === loan.userId ? updatedUserObj! : u);
+            const updatedUser = { ...loanUser, balance: Math.min(loanUser.totalLimit, loanUser.balance + loan.amount), updatedAt: Date.now() };
+            newRegisteredUsers = newRegisteredUsers.map(u => u.id === loan.userId ? updatedUser : u);
             usersUpdated = true;
           }
         }
@@ -701,8 +661,8 @@ const App: React.FC = () => {
       if (action === 'SETTLE') {
         const loanUser = newRegisteredUsers.find(u => u.id === loan.userId);
         if (loanUser) {
-          updatedUserObj = { ...loanUser, balance: Math.min(loanUser.totalLimit, loanUser.balance + loan.amount), rankProgress: Math.min(10, loanUser.rankProgress + 1), updatedAt: Date.now() };
-          newRegisteredUsers = newRegisteredUsers.map(u => u.id === loan.userId ? updatedUserObj! : u);
+          const updatedUser = { ...loanUser, balance: Math.min(loanUser.totalLimit, loanUser.balance + loan.amount), rankProgress: Math.min(10, loanUser.rankProgress + 1), updatedAt: Date.now() };
+          newRegisteredUsers = newRegisteredUsers.map(u => u.id === loan.userId ? updatedUser : u);
           usersUpdated = true;
         }
       }
@@ -745,11 +705,11 @@ const App: React.FC = () => {
         }
       }
 
-      // Persist to server using sync endpoint for better reliability - ONLY SEND DELTAS
+      // Persist to server using sync endpoint for better reliability
       const syncData = {
-        loans: [updatedLoan],
+        loans: newLoans,
         budget: newBudget,
-        users: updatedUserObj ? [updatedUserObj] : undefined,
+        users: usersUpdated ? newRegisteredUsers : undefined,
         loanProfit: action === 'SETTLE' ? newLoanProfit : undefined,
         monthlyStats: action === 'SETTLE' ? newMonthlyStats : undefined
       };
@@ -862,9 +822,9 @@ const App: React.FC = () => {
           setMonthlyStats(newMonthlyStats);
         }
 
-        // Persist to server using sync endpoint - ONLY SEND DELTAS
+        // Persist to server using sync endpoint
         const syncData = {
-          users: [updatedUser],
+          users: newUsers,
           budget: upgradeFee > 0 ? newBudget : undefined,
           rankProfit: upgradeFee > 0 ? newRankProfit : undefined,
           monthlyStats: upgradeFee > 0 ? newMonthlyStats : undefined
@@ -999,11 +959,11 @@ const App: React.FC = () => {
         addNotification(user.id, 'Cập nhật thông tin', 'Thông tin cá nhân của bạn đã được cập nhật thành công.', 'SYSTEM');
       }
 
-      // Persist to server - only send the modified user
+      // Persist to server
       fetch('/api/users', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify([updatedUser])
+        body: JSON.stringify(newUsers)
       }).catch(e => console.error("Lỗi lưu hồ sơ:", e));
     }
   };
@@ -1017,11 +977,11 @@ const App: React.FC = () => {
       addNotification(user.id, 'Cập nhật tài khoản', 'Thông tin tài khoản nhận tiền của bạn đã được cập nhật.', 'SYSTEM');
       setShowBankWarning(false);
       
-      // Persist to server - only send the modified user
+      // Persist to server
       fetch('/api/users', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify([updatedUser])
+        body: JSON.stringify(newUsers)
       }).catch(e => console.error("Lỗi lưu tài khoản ngân hàng:", e));
     }
   };
@@ -1069,40 +1029,25 @@ const App: React.FC = () => {
               setCurrentView(AppView.APPLY_LOAN);
             }}
             onMarkNotificationRead={(id) => {
-              const updatedNotif = notifications.find(n => n.id === id);
-              if (!updatedNotif) return;
-              
-              const newNotif = { ...updatedNotif, read: true };
-              const updatedNotifs = notifications.map(n => n.id === id ? newNotif : n);
+              const updatedNotifs = notifications.map(n => n.id === id ? { ...n, read: true } : n);
               setNotifications(updatedNotifs);
-              
-              // Persist immediately - only send the modified notification
+              // Persist immediately
               fetch('/api/notifications', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify([newNotif])
+                body: JSON.stringify(updatedNotifs)
               }).catch(e => console.error("Lỗi lưu trạng thái thông báo:", e));
             }}
             onMarkAllNotificationsRead={() => {
               if (user) {
-                const userNotifs = notifications.filter(n => n.userId === user.id && !n.read);
-                const updatedUserNotifs = userNotifs.map(n => ({ ...n, read: true }));
-                
-                const updatedNotifs = notifications.map(n => {
-                  const updated = updatedUserNotifs.find(un => un.id === n.id);
-                  return updated || n;
-                });
-                
+                const updatedNotifs = notifications.map(n => n.userId === user.id ? { ...n, read: true } : n);
                 setNotifications(updatedNotifs);
-                
-                // Persist immediately - only send the modified notifications
-                if (updatedUserNotifs.length > 0) {
-                  fetch('/api/notifications', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(updatedUserNotifs)
-                  });
-                }
+                // Persist immediately
+                fetch('/api/notifications', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(updatedNotifs)
+                });
               }
             }}
           />

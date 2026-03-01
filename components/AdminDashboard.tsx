@@ -54,7 +54,12 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const checkDbStatus = async () => {
     setIsCheckingDb(true);
     try {
-      const response = await fetch('/api/supabase-status');
+      const currentToken = localStorage.getItem('vnv_token');
+      const response = await fetch('/api/supabase-status', {
+        headers: {
+          'Authorization': currentToken ? `Bearer ${currentToken}` : ''
+        }
+      });
       
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);

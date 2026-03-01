@@ -110,6 +110,38 @@ const autoCleanupStorage = async () => {
   }
 };
 
+// --- STATUS ROUTE ---
+router.get("/supabase-status", async (req, res) => {
+  try {
+    if (!supabase) {
+      return res.json({ 
+        connected: false, 
+        error: "Supabase chưa được cấu hình (Thiếu URL hoặc KEY)" 
+      });
+    }
+
+    // Test connection by querying a simple table
+    const { error } = await supabase.from('users').select('id').limit(1);
+    
+    if (error) {
+      return res.json({ 
+        connected: false, 
+        error: `Lỗi Supabase: ${error.message}` 
+      });
+    }
+
+    res.json({ 
+      connected: true, 
+      message: "Kết nối Supabase ổn định" 
+    });
+  } catch (e: any) {
+    res.json({ 
+      connected: false, 
+      error: `Lỗi hệ thống: ${e.message}` 
+    });
+  }
+});
+
 // --- AUTH ROUTES ---
 
 router.post("/auth/register", async (req, res) => {
@@ -207,9 +239,9 @@ router.get("/data", authenticateToken, async (req, res) => {
       fetchConfig()
     ]);
 
-    const budget = Number(config?.find(c => c.key === 'budget')?.value ?? 30000000);
-    const rankProfit = Number(config?.find(c => c.key === 'rankProfit')?.value ?? 0);
-    const loanProfit = Number(config?.find(c => c.key === 'loanProfit')?.value ?? 0);
+    const budget = Number(config?.find(c => c.key === 'budget')?.value || 30000000);
+    const rankProfit = Number(config?.find(c => c.key === 'rankProfit')?.value || 0);
+    const loanProfit = Number(config?.find(c => c.key === 'loanProfit')?.value || 0);
     const monthlyStats = config?.find(c => c.key === 'monthlyStats')?.value || [];
 
     const payload = { users, loans, notifications, budget, rankProfit, loanProfit, monthlyStats };
@@ -367,6 +399,11 @@ router.post("/sync", authenticateToken, async (req, res) => {
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
+});
+
+router.use((err: any, req: any, res: any, next: any) => {
+  console.error("Unhandled API Error:", err);
+  res.status(500).json({ error: err.message || "Lỗi hệ thống không xác định" });
 });
 
 router.use((req, res) => {

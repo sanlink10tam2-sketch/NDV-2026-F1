@@ -4,6 +4,14 @@ import { createClient } from "@supabase/supabase-js";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 
+declare global {
+  namespace Express {
+    interface Request {
+      user?: any;
+    }
+  }
+}
+
 const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || "";
 const JWT_SECRET = process.env.JWT_SECRET || "ndv-money-secret-2026";
@@ -173,23 +181,45 @@ router.post("/auth/login", async (req, res) => {
 
 // --- PROTECTED DATA ROUTES ---
 
-router.get("/data", authenticateToken, async (req, res) => {
+router.get("/supabase-status", authenticateToken, async (req: any, res) => {
+  try {
+    if (!supabase) return res.json({ connected: false, message: "Supabase not configured" });
+    const { data, error } = await supabase.from('users').select('id').limit(1);
+    if (error) throw error;
+    res.json({ connected: true });
+  } catch (e: any) {
+    res.json({ connected: false, error: e.message });
+  }
+});
+
+router.get("/data", authenticateToken, async (req: any, res) => {
   try {
     if (!supabase) return res.status(503).json({ error: "Supabase not configured" });
 
     const fetchUsers = async () => {
-      const { data, error } = await supabase.from('users').select('*');
+      let query = supabase.from('users').select('*');
+      if (!req.user.isAdmin) {
+        query = query.eq('id', req.user.id);
+      }
+      const { data, error } = await query;
       return data || [];
     };
 
     const fetchLoans = async () => {
-      const { data, error } = await supabase.from('loans').select('*');
+      let query = supabase.from('loans').select('*');
+      if (!req.user.isAdmin) {
+        query = query.eq('userId', req.user.id);
+      }
+      const { data, error } = await query;
       return data || [];
     };
 
     const fetchNotifications = async () => {
-      const { data, error } = await supabase.from('notifications')
-        .select('*')
+      let query = supabase.from('notifications').select('*');
+      if (!req.user.isAdmin) {
+        query = query.eq('userId', req.user.id);
+      }
+      const { data, error } = await query
         .order('id', { ascending: false })
         .limit(100);
       return data || [];
@@ -226,15 +256,19 @@ router.get("/data", authenticateToken, async (req, res) => {
   }
 });
 
-router.post("/users", authenticateToken, async (req, res) => {
+router.post("/users", authenticateToken, async (req: any, res) => {
   try {
     if (!supabase) return res.status(503).json({ error: "Supabase not configured" });
     const incomingUsers = req.body;
     if (!Array.isArray(incomingUsers)) return res.status(400).json({ error: "Dữ liệu phải là mảng" });
 
-    // Concurrency check: only update if incoming updatedAt is >= current updatedAt
-    // For bulk upsert, we'll use a more complex approach or just trust the admin for now
-    // but for single user updates (profile), we should be careful.
+    // Security: Non-admins can only update their own record
+    if (!req.user.isAdmin) {
+      const otherUsers = incomingUsers.filter(u => u.id !== req.user.id);
+      if (otherUsers.length > 0) {
+        return res.status(403).json({ error: "Bạn không có quyền cập nhật người dùng khác" });
+      }
+    }
     
     const { error } = await supabase.from('users').upsert(incomingUsers, { onConflict: 'id' });
     if (error) throw error;
@@ -244,11 +278,19 @@ router.post("/users", authenticateToken, async (req, res) => {
   }
 });
 
-router.post("/loans", authenticateToken, async (req, res) => {
+router.post("/loans", authenticateToken, async (req: any, res) => {
   try {
     if (!supabase) return res.status(503).json({ error: "Supabase not configured" });
     const incomingLoans = req.body;
     if (!Array.isArray(incomingLoans)) return res.status(400).json({ error: "Dữ liệu phải là mảng" });
+
+    // Security: Non-admins can only update their own loans
+    if (!req.user.isAdmin) {
+      const otherLoans = incomingLoans.filter(l => l.userId !== req.user.id);
+      if (otherLoans.length > 0) {
+        return res.status(403).json({ error: "Bạn không có quyền cập nhật khoản vay của người khác" });
+      }
+    }
 
     // Server-side validation for new loans
     for (const loan of incomingLoans) {
@@ -273,11 +315,19 @@ router.post("/loans", authenticateToken, async (req, res) => {
   }
 });
 
-router.post("/notifications", authenticateToken, async (req, res) => {
+router.post("/notifications", authenticateToken, async (req: any, res) => {
   try {
     if (!supabase) return res.status(503).json({ error: "Supabase not configured" });
     const incomingNotifs = req.body;
     if (!Array.isArray(incomingNotifs)) return res.status(400).json({ error: "Dữ liệu phải là mảng" });
+
+    // Security: Non-admins can only update their own notifications
+    if (!req.user.isAdmin) {
+      const otherNotifs = incomingNotifs.filter(n => n.userId !== req.user.id);
+      if (otherNotifs.length > 0) {
+        return res.status(403).json({ error: "Bạn không có quyền cập nhật thông báo của người khác" });
+      }
+    }
 
     const { error } = await supabase.from('notifications').upsert(incomingNotifs, { onConflict: 'id' });
     if (error) throw error;
@@ -287,7 +337,7 @@ router.post("/notifications", authenticateToken, async (req, res) => {
   }
 });
 
-router.post("/budget", authenticateToken, async (req, res) => {
+router.post("/budget", authenticateToken, async (req: any, res) => {
   try {
     if (!supabase) return res.status(503).json({ error: "Supabase not configured" });
     const { budget } = req.body;
@@ -298,7 +348,7 @@ router.post("/budget", authenticateToken, async (req, res) => {
   }
 });
 
-router.post("/rankProfit", authenticateToken, async (req, res) => {
+router.post("/rankProfit", authenticateToken, async (req: any, res) => {
   try {
     if (!supabase) return res.status(503).json({ error: "Supabase not configured" });
     const { rankProfit } = req.body;
@@ -309,7 +359,7 @@ router.post("/rankProfit", authenticateToken, async (req, res) => {
   }
 });
 
-router.post("/loanProfit", authenticateToken, async (req, res) => {
+router.post("/loanProfit", authenticateToken, async (req: any, res) => {
   try {
     if (!supabase) return res.status(503).json({ error: "Supabase not configured" });
     const { loanProfit } = req.body;
@@ -320,7 +370,7 @@ router.post("/loanProfit", authenticateToken, async (req, res) => {
   }
 });
 
-router.post("/monthlyStats", authenticateToken, async (req, res) => {
+router.post("/monthlyStats", authenticateToken, async (req: any, res) => {
   try {
     if (!supabase) return res.status(503).json({ error: "Supabase not configured" });
     const { monthlyStats } = req.body;
@@ -331,10 +381,16 @@ router.post("/monthlyStats", authenticateToken, async (req, res) => {
   }
 });
 
-router.delete("/users/:id", authenticateToken, async (req, res) => {
+router.delete("/users/:id", authenticateToken, async (req: any, res) => {
   try {
     if (!supabase) return res.status(503).json({ error: "Supabase not configured" });
     const userId = req.params.id;
+
+    // Security: Non-admins can only delete themselves
+    if (!req.user.isAdmin && userId !== req.user.id) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
     await Promise.all([
       supabase.from('users').delete().eq('id', userId),
       supabase.from('loans').delete().eq('userId', userId),
@@ -346,11 +402,21 @@ router.delete("/users/:id", authenticateToken, async (req, res) => {
   }
 });
 
-router.post("/sync", authenticateToken, async (req, res) => {
+router.post("/sync", authenticateToken, async (req: any, res) => {
   try {
     if (!supabase) return res.status(503).json({ error: "Supabase not configured" });
     const { users, loans, notifications, budget, rankProfit, loanProfit, monthlyStats } = req.body;
     
+    // Security: Non-admins can only sync their own data
+    if (!req.user.isAdmin) {
+      if (users && users.some(u => u.id !== req.user.id)) return res.status(403).json({ error: "Forbidden" });
+      if (loans && loans.some(l => l.userId !== req.user.id)) return res.status(403).json({ error: "Forbidden" });
+      if (notifications && notifications.some(n => n.userId !== req.user.id)) return res.status(403).json({ error: "Forbidden" });
+      if (budget !== undefined || rankProfit !== undefined || loanProfit !== undefined || monthlyStats !== undefined) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+    }
+
     const tasks = [];
     if (users && Array.isArray(users)) tasks.push(supabase.from('users').upsert(users, { onConflict: 'id' }));
     if (loans && Array.isArray(loans)) tasks.push(supabase.from('loans').upsert(loans, { onConflict: 'id' }));

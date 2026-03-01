@@ -56,6 +56,7 @@ const App: React.FC = () => {
   const [settleLoanFromDash, setSettleLoanFromDash] = useState<LoanRecord | null>(null);
   const [viewLoanFromDash, setViewLoanFromDash] = useState<LoanRecord | null>(null);
   const [user, setUser] = useState<User | null>(null);
+  const [token, setToken] = useState<string | null>(localStorage.getItem('vnv_token'));
   const [loans, setLoans] = useState<LoanRecord[]>([]);
   const [registeredUsers, setRegisteredUsers] = useState<User[]>([]);
   const [notifications, setNotifications] = useState<Notification[]>([]);
@@ -94,9 +95,13 @@ const App: React.FC = () => {
 
     // Sync notification to server immediately
     try {
+      const currentToken = token || localStorage.getItem('vnv_token');
       await fetch('/api/notifications', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': currentToken ? `Bearer ${currentToken}` : ''
+        },
         body: JSON.stringify(newNotifs)
       });
     } catch (e) {
@@ -118,7 +123,19 @@ const App: React.FC = () => {
         // Only check storage usage if user is admin to save resources
         const url = user?.isAdmin ? '/api/data?checkStorage=true' : '/api/data';
         
-        const response = await fetch(url, { signal: controller.signal });
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json'
+        };
+        
+        const currentToken = token || localStorage.getItem('vnv_token');
+        if (currentToken) {
+          headers['Authorization'] = `Bearer ${currentToken}`;
+        }
+
+        const response = await fetch(url, { 
+          signal: controller.signal,
+          headers
+        });
         clearTimeout(timeout);
 
         if (!response.ok) {
@@ -184,9 +201,13 @@ const App: React.FC = () => {
         // Only handle auto-login during the very first fetch
         if (isInitial) {
           const savedUser = localStorage.getItem('vnv_user');
-          if (savedUser && savedUser !== 'null' && savedUser !== '') {
+          const savedToken = localStorage.getItem('vnv_token');
+          
+          if (savedUser && savedUser !== 'null' && savedUser !== '' && savedToken) {
             try {
               const parsedUser = JSON.parse(savedUser);
+              setToken(savedToken);
+              
               const freshUser = data.users.find((u: User) => u.id === parsedUser.id);
               if (freshUser) {
                 setUser(freshUser);
@@ -197,6 +218,7 @@ const App: React.FC = () => {
               }
             } catch (jsonError) {
               localStorage.removeItem('vnv_user');
+              localStorage.removeItem('vnv_token');
             }
           }
         }
@@ -353,14 +375,20 @@ const App: React.FC = () => {
       }
 
       // Persist calculated fines/demotions to server
-      fetch('/api/sync', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          loans: loansUpdated ? newLoans : undefined,
-          users: usersUpdated ? newUsers : undefined
-        })
-      }).catch(e => console.error("Lỗi đồng bộ phạt/hạ hạng:", e));
+      const currentToken = token || localStorage.getItem('vnv_token');
+      if (currentToken) {
+        fetch('/api/sync', {
+          method: 'POST',
+          headers: { 
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${currentToken}`
+          },
+          body: JSON.stringify({
+            loans: loansUpdated ? newLoans : undefined,
+            users: usersUpdated ? newUsers : undefined
+          })
+        }).catch(e => console.error("Lỗi đồng bộ phạt/hạ hạng:", e));
+      }
     }
   }, [isInitialized, loans, registeredUsers, isGlobalProcessing]);
 
@@ -373,30 +401,33 @@ const App: React.FC = () => {
     }
   }, [user, rememberMe]);
 
-  const handleLogin = (phone: string, password?: string) => {
+  const handleLogin = async (phone: string, password?: string) => {
     setLoginError(null);
-    const isAdmin = (phone === '0877203996' && password === '119011');
-    if (isAdmin) {
-      const adminUser: User = {
-        id: 'AD01', phone: '0877203996', fullName: 'QUẢN TRỊ VIÊN', idNumber: 'SYSTEM_ADMIN',
-        balance: 500000000, totalLimit: 500000000, rank: 'diamond', rankProgress: 10,
-        isLoggedIn: true, isAdmin: true, password: '119011'
-      };
-      setUser(adminUser);
-      setCurrentView(AppView.ADMIN_DASHBOARD);
-      setShowBankWarning(false);
-      return;
-    }
-    const existingUser = registeredUsers.find(u => u.phone === phone && u.password === password);
-    if (existingUser) {
-      const loggedInUser = { ...existingUser, isLoggedIn: true };
-      setUser(loggedInUser);
-      setCurrentView(AppView.DASHBOARD);
-      if (!hasBankInfo(loggedInUser)) {
-        setShowBankWarning(true);
+    try {
+      const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone, password })
+      });
+      
+      const data = await response.json();
+      
+      if (response.ok) {
+        const loggedInUser = { ...data.user, isLoggedIn: true };
+        setUser(loggedInUser);
+        setToken(data.token);
+        localStorage.setItem('vnv_token', data.token);
+        
+        setCurrentView(loggedInUser.isAdmin ? AppView.ADMIN_DASHBOARD : AppView.DASHBOARD);
+        if (!hasBankInfo(loggedInUser)) {
+          setShowBankWarning(true);
+        }
+      } else {
+        setLoginError(data.error || "Số điện thoại hoặc mật khẩu không chính xác.");
       }
-    } else {
-      setLoginError("Số điện thoại hoặc mật khẩu không chính xác.");
+    } catch (e) {
+      console.error("Lỗi đăng nhập:", e);
+      setLoginError("Lỗi kết nối máy chủ. Vui lòng thử lại.");
     }
   };
 
@@ -406,43 +437,29 @@ const App: React.FC = () => {
     setIsGlobalProcessing(true);
     try {
       setRegisterError(null);
-      const existingUser = registeredUsers.find(u => u.phone === userData.phone);
-      if (existingUser) {
-        setRegisterError("Số điện thoại này đã được đăng ký.");
-        isProcessingRef.current = false;
-        setIsGlobalProcessing(false);
-        return;
-      }
-
-      const newUser: User = {
-        id: Math.floor(1000 + Math.random() * 9000).toString(), 
-        phone: userData.phone || '', fullName: userData.fullName || '',
-        idNumber: userData.idNumber || '', address: userData.address || '',
-        password: userData.password || '',
-        balance: 2000000, totalLimit: 2000000, rank: 'standard', rankProgress: 0,
-        isLoggedIn: true, isAdmin: false,
-        joinDate: new Date().toLocaleTimeString('vi-VN') + ' ' + new Date().toLocaleDateString('vi-VN'),
-        idFront: userData.idFront, idBack: userData.idBack, refZalo: userData.refZalo, relationship: userData.relationship,
-        lastLoanSeq: 0,
-        updatedAt: Date.now()
-      };
       
-      const newUsers = [...registeredUsers, newUser];
-      
-      // Optimistic UI
-      setRegisteredUsers(newUsers);
-      setUser(newUser);
-      setCurrentView(AppView.DASHBOARD);
-      setShowBankWarning(true);
-
-      // Persist to server
-      await fetch('/api/users', {
+      const response = await fetch('/api/auth/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newUsers)
+        body: JSON.stringify(userData)
       });
+      
+      const data = await response.json();
+      
+      if (response.ok) {
+        const newUser = { ...data.user, isLoggedIn: true };
+        setUser(newUser);
+        setToken(data.token);
+        localStorage.setItem('vnv_token', data.token);
+        
+        setCurrentView(AppView.DASHBOARD);
+        setShowBankWarning(true);
+      } else {
+        setRegisterError(data.error || "Đăng ký thất bại.");
+      }
     } catch (e) {
       console.error("Lỗi lưu đăng ký:", e);
+      setRegisterError("Lỗi kết nối máy chủ.");
     } finally {
       isProcessingRef.current = false;
       setIsGlobalProcessing(false);
@@ -451,6 +468,9 @@ const App: React.FC = () => {
 
   const handleLogout = () => {
     setUser(null);
+    setToken(null);
+    localStorage.removeItem('vnv_token');
+    localStorage.removeItem('vnv_user');
     setCurrentView(AppView.LOGIN);
   };
 
@@ -509,15 +529,22 @@ const App: React.FC = () => {
       setRegisteredUsers(newRegisteredUsers);
 
       // Persist to server and wait
+      const currentToken = token || localStorage.getItem('vnv_token');
       await Promise.all([
         fetch('/api/loans', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 
+            'Content-Type': 'application/json',
+            'Authorization': currentToken ? `Bearer ${currentToken}` : ''
+          },
           body: JSON.stringify(newLoans)
         }),
         fetch('/api/users', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 
+            'Content-Type': 'application/json',
+            'Authorization': currentToken ? `Bearer ${currentToken}` : ''
+          },
           body: JSON.stringify(newRegisteredUsers)
         })
       ]);
@@ -552,9 +579,13 @@ const App: React.FC = () => {
       setRegisteredUsers(newRegisteredUsers);
 
       // Persist to server and wait
+      const currentToken = token || localStorage.getItem('vnv_token');
       await fetch('/api/users', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': currentToken ? `Bearer ${currentToken}` : ''
+        },
         body: JSON.stringify(newRegisteredUsers)
       });
     } catch (e) {
@@ -578,9 +609,13 @@ const App: React.FC = () => {
       setLoans(newLoans);
 
       // Persist to server and wait
+      const currentToken = token || localStorage.getItem('vnv_token');
       await fetch('/api/loans', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': currentToken ? `Bearer ${currentToken}` : ''
+        },
         body: JSON.stringify(newLoans)
       });
     } catch (e) {
@@ -714,9 +749,13 @@ const App: React.FC = () => {
         monthlyStats: action === 'SETTLE' ? newMonthlyStats : undefined
       };
 
+      const currentToken = token || localStorage.getItem('vnv_token');
       const response = await fetch('/api/sync', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': currentToken ? `Bearer ${currentToken}` : ''
+        },
         body: JSON.stringify(syncData)
       });
 
@@ -823,6 +862,7 @@ const App: React.FC = () => {
         }
 
         // Persist to server using sync endpoint
+        const currentToken = token || localStorage.getItem('vnv_token');
         const syncData = {
           users: newUsers,
           budget: upgradeFee > 0 ? newBudget : undefined,
@@ -832,7 +872,10 @@ const App: React.FC = () => {
 
         const response = await fetch('/api/sync', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 
+            'Content-Type': 'application/json',
+            'Authorization': currentToken ? `Bearer ${currentToken}` : ''
+          },
           body: JSON.stringify(syncData)
         });
 
@@ -851,9 +894,13 @@ const App: React.FC = () => {
   const handleResetRankProfit = async () => {
     setRankProfit(0);
     try {
+      const currentToken = token || localStorage.getItem('vnv_token');
       await fetch('/api/rankProfit', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': currentToken ? `Bearer ${currentToken}` : ''
+        },
         body: JSON.stringify({ rankProfit: 0 })
       });
     } catch (e) {
@@ -864,9 +911,13 @@ const App: React.FC = () => {
   const handleResetLoanProfit = async () => {
     setLoanProfit(0);
     try {
+      const currentToken = token || localStorage.getItem('vnv_token');
       await fetch('/api/loanProfit', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': currentToken ? `Bearer ${currentToken}` : ''
+        },
         body: JSON.stringify({ loanProfit: 0 })
       });
     } catch (e) {
@@ -876,7 +927,13 @@ const App: React.FC = () => {
 
   const handleDeleteUser = async (userId: string) => {
     try {
-      await fetch(`/api/users/${userId}`, { method: 'DELETE' });
+      const currentToken = token || localStorage.getItem('vnv_token');
+      await fetch(`/api/users/${userId}`, { 
+        method: 'DELETE',
+        headers: {
+          'Authorization': currentToken ? `Bearer ${currentToken}` : ''
+        }
+      });
       setRegisteredUsers(prev => prev.filter(u => u.id !== userId));
       setLoans(prev => prev.filter(l => l.userId !== userId));
     } catch (e) {
@@ -929,7 +986,13 @@ const App: React.FC = () => {
     
     for (const u of usersToDelete) {
       try {
-        await fetch(`/api/users/${u.id}`, { method: 'DELETE' });
+        const currentToken = token || localStorage.getItem('vnv_token');
+        await fetch(`/api/users/${u.id}`, { 
+          method: 'DELETE',
+          headers: {
+            'Authorization': currentToken ? `Bearer ${currentToken}` : ''
+          }
+        });
       } catch (e) {
         console.error("Lỗi khi dọn dẹp user:", u.id, e);
       }
@@ -960,9 +1023,13 @@ const App: React.FC = () => {
       }
 
       // Persist to server
+      const currentToken = token || localStorage.getItem('vnv_token');
       fetch('/api/users', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': currentToken ? `Bearer ${currentToken}` : ''
+        },
         body: JSON.stringify(newUsers)
       }).catch(e => console.error("Lỗi lưu hồ sơ:", e));
     }
@@ -978,9 +1045,13 @@ const App: React.FC = () => {
       setShowBankWarning(false);
       
       // Persist to server
+      const currentToken = token || localStorage.getItem('vnv_token');
       fetch('/api/users', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': currentToken ? `Bearer ${currentToken}` : ''
+        },
         body: JSON.stringify(newUsers)
       }).catch(e => console.error("Lỗi lưu tài khoản ngân hàng:", e));
     }
@@ -1032,9 +1103,13 @@ const App: React.FC = () => {
               const updatedNotifs = notifications.map(n => n.id === id ? { ...n, read: true } : n);
               setNotifications(updatedNotifs);
               // Persist immediately
+              const currentToken = token || localStorage.getItem('vnv_token');
               fetch('/api/notifications', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 
+                  'Content-Type': 'application/json',
+                  'Authorization': currentToken ? `Bearer ${currentToken}` : ''
+                },
                 body: JSON.stringify(updatedNotifs)
               }).catch(e => console.error("Lỗi lưu trạng thái thông báo:", e));
             }}
@@ -1043,9 +1118,13 @@ const App: React.FC = () => {
                 const updatedNotifs = notifications.map(n => n.userId === user.id ? { ...n, read: true } : n);
                 setNotifications(updatedNotifs);
                 // Persist immediately
+                const currentToken = token || localStorage.getItem('vnv_token');
                 fetch('/api/notifications', {
                   method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
+                  headers: { 
+                    'Content-Type': 'application/json',
+                    'Authorization': currentToken ? `Bearer ${currentToken}` : ''
+                  },
                   body: JSON.stringify(updatedNotifs)
                 });
               }
@@ -1090,9 +1169,13 @@ const App: React.FC = () => {
             onUpdate={async (val) => {
               setSystemBudget(val);
               try {
+                const currentToken = token || localStorage.getItem('vnv_token');
                 await fetch('/api/budget', {
                   method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
+                  headers: { 
+                    'Content-Type': 'application/json',
+                    'Authorization': currentToken ? `Bearer ${currentToken}` : ''
+                  },
                   body: JSON.stringify({ budget: val })
                 });
               } catch (e) {
@@ -1135,9 +1218,13 @@ const App: React.FC = () => {
             onMarkNotificationRead={(id) => {
               const updatedNotifs = notifications.map(n => n.id === id ? { ...n, read: true } : n);
               setNotifications(updatedNotifs);
+              const currentToken = token || localStorage.getItem('vnv_token');
               fetch('/api/notifications', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 
+                  'Content-Type': 'application/json',
+                  'Authorization': currentToken ? `Bearer ${currentToken}` : ''
+                },
                 body: JSON.stringify(updatedNotifs)
               }).catch(e => console.error("Lỗi lưu trạng thái thông báo:", e));
             }}
@@ -1145,9 +1232,13 @@ const App: React.FC = () => {
               if (user) {
                 const updatedNotifs = notifications.map(n => n.userId === user.id ? { ...n, read: true } : n);
                 setNotifications(updatedNotifs);
+                const currentToken = token || localStorage.getItem('vnv_token');
                 fetch('/api/notifications', {
                   method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
+                  headers: { 
+                    'Content-Type': 'application/json',
+                    'Authorization': currentToken ? `Bearer ${currentToken}` : ''
+                  },
                   body: JSON.stringify(updatedNotifs)
                 });
               }

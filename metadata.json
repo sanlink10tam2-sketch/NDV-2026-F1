@@ -1,6 +1,6 @@
 {
   "name": "NDV 2026 F1",
-  "description": "NDV 2026 F1 - Tối ưu hóa API tải dữ liệu theo người dùng",
+  "description": "NDV 2026 F1",
   "requestFramePermissions": [
     "camera"
   ]

@@ -21,9 +21,7 @@ async function startServer() {
   app.use(express.json({ limit: '50mb' }));
 
   // Use the API routes from /api/index.ts
-  console.log("Mounting API routes...");
   app.use("/api", apiApp);
-  console.log("API routes mounted.");
 
   // Vite middleware for development
   const distPath = path.join(process.cwd(), "dist");
